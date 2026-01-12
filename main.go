@@ -2,12 +2,12 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -25,61 +25,53 @@ type RelayInfo struct {
 
 type NotifyBundle struct{}
 
-func (nb *NotifyBundle) Listen(n network.Network, a ma.Multiaddr) {
-	log.Printf("[notifiee] Listen: %s\n", a)
-}
-
-func (nb *NotifyBundle) ListenClose(n network.Network, a ma.Multiaddr) {
-	log.Printf("[notifiee] ListenClose: %s\n", a)
-}
-
+func (nb *NotifyBundle) Listen(n network.Network, a ma.Multiaddr)      {}
+func (nb *NotifyBundle) ListenClose(n network.Network, a ma.Multiaddr) {}
 func (nb *NotifyBundle) Connected(n network.Network, c network.Conn) {
-	log.Printf("[notifiee] Connected: %s <-> %s  peer=%s\n",
-		c.LocalMultiaddr(), c.RemoteMultiaddr(), c.RemotePeer().String())
+	log.Printf("[connected] peer=%s", c.RemotePeer().String())
 }
-
 func (nb *NotifyBundle) Disconnected(n network.Network, c network.Conn) {
-	log.Printf("[notifiee] Disconnected: %s <-> %s  peer=%s\n",
-		c.LocalMultiaddr(), c.RemoteMultiaddr(), c.RemotePeer().String())
+	log.Printf("[disconnected] peer=%s", c.RemotePeer().String())
 }
+func (nb *NotifyBundle) OpenedStream(net network.Network, stream network.Stream) {}
+func (nb *NotifyBundle) ClosedStream(net network.Network, stream network.Stream) {}
 
-func (nb *NotifyBundle) OpenedStream(net network.Network, stream network.Stream) {
-	log.Printf("[notifiee] OpenedStream: from=%s to=%s protocol=%s\n",
-		stream.Conn().LocalPeer().String(), stream.Conn().RemotePeer().String(), stream.Protocol())
-}
-
-func (nb *NotifyBundle) ClosedStream(net network.Network, stream network.Stream) {
-	log.Printf("[notifiee] ClosedStream: from=%s to=%s protocol=%s\n",
-		stream.Conn().LocalPeer().String(), stream.Conn().RemotePeer().String(), stream.Protocol())
-}
-
-func loadOrCreatePrivateKey(keyPath string) (crypto.PrivKey, error) {
-	if data, err := os.ReadFile(keyPath); err == nil {
-		priv, err := crypto.UnmarshalPrivateKey(data)
-		if err == nil {
-			log.Println("Loaded existing private key")
-			return priv, nil
+func getPrivateKey() (crypto.PrivKey, error) {
+	// Check for RELAY_PRIVATE_KEY env var (Base64 encoded)
+	keyB64 := os.Getenv("RELAY_PRIVATE_KEY")
+	if keyB64 != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(keyB64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode RELAY_PRIVATE_KEY: %w", err)
 		}
-		log.Printf("Failed to unmarshal key: %v", err)
+		priv, err := crypto.UnmarshalPrivateKey(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal private key: %w", err)
+		}
+		log.Println("Loaded private key from RELAY_PRIVATE_KEY env var")
+		return priv, nil
 	}
 
+	// Generate new key and print Base64 for user to save
+	log.Println("No RELAY_PRIVATE_KEY found, generating new key...")
 	priv, _, err := crypto.GenerateKeyPairWithReader(crypto.Ed25519, 2048, rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key: %w", err)
 	}
 
-	data, err := crypto.MarshalPrivateKey(priv)
+	keyBytes, err := crypto.MarshalPrivateKey(priv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal key: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
-		log.Printf("Could not create key directory: %v", err)
-	} else if err := os.WriteFile(keyPath, data, 0600); err != nil {
-		log.Printf("Could not save private key: %v", err)
-	} else {
-		log.Println("Generated and saved new private key")
-	}
+	keyB64 = base64.StdEncoding.EncodeToString(keyBytes)
+	log.Println("========================================")
+	log.Println("NEW PRIVATE KEY GENERATED!")
+	log.Println("To keep the same Peer ID after restart,")
+	log.Println("add this environment variable in Render:")
+	log.Println("")
+	log.Println("RELAY_PRIVATE_KEY=" + keyB64)
+	log.Println("========================================")
 
 	return priv, nil
 }
@@ -97,14 +89,9 @@ func main() {
 		port = "443"
 	}
 
-	keyPath := os.Getenv("KEY_PATH")
-	if keyPath == "" {
-		keyPath = "/data/relay_private_key"
-	}
-
-	privKey, err := loadOrCreatePrivateKey(keyPath)
+	privKey, err := getPrivateKey()
 	if err != nil {
-		log.Fatalf("Failed to load/create private key: %v", err)
+		log.Fatalf("Failed to get private key: %v", err)
 	}
 
 	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%s/ws", port)
